@@ -1,92 +1,76 @@
-import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.size
-import androidx.compose.runtime.*
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.unit.dp
-import kotlin.math.atan2
-import kotlin.math.cos
-import kotlin.math.sin
+#include <plugin.h>
+#include <core.h>
+#include <signal_path/vfo_manager.h>
+#include <imgui/imgui.h>
+#include <gui/gui.h>
+#include <cmath>
 
-@Composable
-fun VfoKnob(
-    modifier: Modifier = Modifier,
-    onFrequencyChanged: (Double) -> Unit // Callback przekazujący zmianę w Hz
-) {
-    var angle by remember { mutableStateOf(0f) }
-    val knobRadius = 100.dp
-    
-    Box(
-        modifier = modifier
-            .size(knobRadius * 2)
-            .background(Color.Transparent)
-            .pointerInput(Unit) {
-                detectDragGestures { change, dragAmount ->
-                    change.consume()
-                    
-                    // Środek pokrętła w pikselach
-                    val centerX = size.width / 2f
-                    val centerY = size.height / 2f
-                    
-                    // Aktualna pozycja palca względem środka
-                    val currentX = change.position.x - centerX
-                    val currentY = change.position.y - centerY
-                    
-                    // Poprzednia pozycja palca względem środka
-                    val prevX = (change.position.x - dragAmount.x) - centerX
-                    val prevY = (change.position.y - dragAmount.y) - centerY
-                    
-                    // Obliczanie kąta przesunięcia palca
-                    val currentAngle = atan2(currentY, currentX)
-                    val prevAngle = atan2(prevY, prevX)
-                    var deltaAngle = currentAngle - prevAngle
-                    
-                    // Korekta przeskoku kąta (np. z -PI na +PI)
-                    if (deltaAngle > Math.PI) deltaAngle -= (2 * Math.PI).toFloat()
-                    if (deltaAngle < -Math.PI) deltaAngle += (2 * Math.PI).toFloat()
-                    
-                    angle += deltaAngle
-                    
-                    // Przeliczenie obrotu na zmianę częstotliwości (np. 1 stopień = 500 Hz)
-                    val deltaHz = (deltaAngle * (180 / Math.PI)) * 500.0
-                    onFrequencyChanged(deltaHz)
-                }
-            }
-    ) {
-        Canvas(modifier = Modifier.size(knobRadius * 2)) {
-            val center = Offset(size.width / 2, size.height / 2)
-            val radiusPx = size.width / 2
-            
-            // 1. Rysowanie głównego korpusu pokrętła (ciemny metalik)
-            drawCircle(
-                color = Color(0xFF2C2C2C),
-                radius = radiusPx,
-                center = center
-            )
-            
-            // 2. Rysowanie ramki/obwódki pokrętła
-            drawCircle(
-                color = Color(0xFF4A4A4A),
-                radius = radiusPx - 4f,
-                center = center,
-                style = androidx.compose.ui.graphics.drawscope.Stroke(width = 4f)
-            )
-            
-            // 3. Rysowanie wskaźnika (kropki) na pokrętle na podstawie aktualnego kąta
-            val markerRadius = radiusPx - 30f
-            val markerX = center.x + markerRadius * cos(angle)
-            val markerY = center.y + markerRadius * sin(angle)
-            
-            drawCircle(
-                color = Color(0xFF00E5FF), // Jasnoniebieski wskaźnik LED
-                radius = 12f,
-                center = Offset(markerX, markerY)
-            )
-        }
+class TouchKnobPlugin : public Plugin {
+public:
+    TouchKnobPlugin(std::string name) { this->name = name; }
+    ~TouchKnobPlugin() {}
+
+    void init() override {
+        // Prawidłowa rejestracja menu w bocznym panelu aplikacji
+        gui::menu::registerMenu("Touch Knob VFO", uiDraw, this);
     }
+
+    void end() override {
+        gui::menu::removeMenu("Touch Knob VFO");
+    }
+
+    std::string getName() override { return name; }
+
+private:
+    std::string name;
+
+    static void uiDraw(void* ctx) {
+        // Korzystamy z poprawnej ścieżki do obiektów VFO w SDR++
+        if (sigpath::vfoManager.vfos.empty()) {
+            ImGui::Text("Uruchom odbiornik VFO (Play)");
+            return;
+        }
+
+        // Pobranie pierwszego aktywnego odbiornika VFO
+        auto vfo = sigpath::vfoManager.vfos.begin()->second;
+        double freq = vfo->getFrequency();
+
+        ImGui::Text("Częstotliwość: %.3f MHz", freq / 1000000.0);
+        ImGui::Spacing();
+
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        ImDrawList* draw_list = ImGui::GetWindowDrawList();
+        float radius = 80.0f; 
+        ImVec2 center = ImVec2(p.x + radius, p.y + radius);
+
+        // Wygląd pokrętła 2D
+        draw_list->AddCircleFilled(center, radius, IM_COL32(40, 40, 50, 255));
+        draw_list->AddCircle(center, radius, IM_COL32(0, 229, 255, 255), 0, 2.5f);
+
+        ImGui::InvisibleButton("vfo_touch", ImVec2(radius * 2, radius * 2));
+        static float angle = 0.0f;
+
+        if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+            ImVec2 delta = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
+            
+            // Czułość: 1 piksel ruchu w pionie = 500 Hz zmiany częstotliwości
+            float step = delta.y * -500.0f; 
+            freq += step;
+            angle += (delta.y * -0.04f);
+            
+            vfo->setFrequency(freq);
+            ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
+        }
+
+        // Żółty wskaźnik obrotu na pokrętle
+        ImVec2 marker = ImVec2(center.x + cosf(angle) * (radius - 20.0f), center.y + sinf(angle) * (radius - 20.0f));
+        draw_list->AddCircleFilled(marker, 7.0f, IM_COL32(255, 200, 0, 255));
+
+        ImGui::Dummy(ImVec2(radius * 2, radius * 2));
+    }
+};
+
+// Oficjalne makro rejestrujące wtyczkę w strukturach aplikacji
+SDRPP_PLUGIN_DEFAULT_HANDLERS(TouchKnobPlugin)
+
 }
